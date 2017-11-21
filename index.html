@@ -28,7 +28,7 @@
                 const marker = new ymaps.Placemark(
                     clinic.points,
                     {
-                        balloonContent: `<strong>${clinic.name}</strong></a><br/>${clinic.address}`
+                        balloonContent: `<strong>${clinic.name}</strong></a><br/>${clinic.raw_address}`
                     },
                     {
                         preset: 'islands#circleDotIcon',
