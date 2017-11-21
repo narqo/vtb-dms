@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -23,8 +24,10 @@ func init() {
 }
 
 var (
-	dataFile = flag.String("in", "", "path to input file")
-	outFile  = flag.String("out", "", "path to output file")
+	dataFile  = flag.String("in", "", "path to input file")
+	outFile   = flag.String("out", "", "path to output file")
+	outFormat = flag.String("format", "json", "output format")
+	debug     = flag.Bool("debug", false, "debug")
 )
 
 type Clinic struct {
@@ -33,6 +36,8 @@ type Clinic struct {
 	Address    string    `json:"address,omitempty"`
 	Points     []float64 `json:"points"`
 }
+
+var clinics []*Clinic
 
 func main() {
 	flag.Parse()
@@ -67,16 +72,26 @@ func main() {
 
 	wg.Wait()
 
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(clinics); err != nil {
+		panic(err)
+	}
+
 	out := os.Stdout
 	if *outFile != "" && *outFile != "-" {
 		out, err = os.Create(*outFile)
 		if err != nil {
 			panic(err)
 		}
+		defer out.Close()
 	}
-
-	if err := json.NewEncoder(out).Encode(clinics); err != nil {
-		panic(err)
+	switch *outFormat {
+	case "js":
+		fmt.Fprintf(out, "data = %s", buf.String())
+	case "json":
+		io.Copy(out, &buf)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown output format: %q", *outFormat)
 	}
 }
 
@@ -85,8 +100,6 @@ const (
 	_MODE_SECTION
 	_MODE_ADDRESS
 )
-
-var clinics []*Clinic
 
 type parser struct {
 	s        *bufio.Scanner
@@ -138,35 +151,15 @@ func (p parser) Parse() error {
 	return p.s.Err()
 }
 
-type geocodeResponse struct {
-	Response struct {
-		GeoObjectCollection struct {
-			FeatureMember []struct {
-				GeoObject geoObject `json:"GeoObject"`
-			} `json:"featureMember"`
-		}
-	} `json:"response"`
-}
-
-type geoObject struct {
-	Name             string `json:"name"`
-	Description      string `json:"description"`
-	MetaDataProperty struct {
-		GeocoderMetaData struct {
-			Text string `json:"text"`
-		} `json:"GeocoderMetaData"`
-	} `json:"metaDataProperty"`
-	Point struct {
-		Pos string `json:"pos"`
-	} `json:"Point"`
-}
-
 func doGeocodeClinic(cc *Clinic) error {
 	vals := make(url.Values)
 	vals.Set("geocode", cc.RawAddress)
 	vals.Set("lang", "ru_RU")
 	vals.Set("kind", "house")
 	vals.Set("format", "json")
+	if *debug {
+		println("geocoding", cc.RawAddress)
+	}
 
 	u := *geocoderAPI
 	u.RawQuery = vals.Encode()
@@ -207,4 +200,27 @@ func doGeocodeClinic(cc *Clinic) error {
 	cc.Address = geoObj.MetaDataProperty.GeocoderMetaData.Text
 
 	return nil
+}
+
+type geocodeResponse struct {
+	Response struct {
+		GeoObjectCollection struct {
+			FeatureMember []struct {
+				GeoObject geoObject `json:"GeoObject"`
+			} `json:"featureMember"`
+		}
+	} `json:"response"`
+}
+
+type geoObject struct {
+	Name             string `json:"name"`
+	Description      string `json:"description"`
+	MetaDataProperty struct {
+		GeocoderMetaData struct {
+			Text string `json:"text"`
+		} `json:"GeocoderMetaData"`
+	} `json:"metaDataProperty"`
+	Point struct {
+		Pos string `json:"pos"`
+	} `json:"Point"`
 }
