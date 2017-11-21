@@ -33,6 +33,7 @@ var (
 type Clinic struct {
 	Name       string    `json:"name"`
 	RawAddress string    `json:"raw_address"`
+	Phone      string    `json:"phone"`
 	Address    string    `json:"address,omitempty"`
 	Points     []float64 `json:"points"`
 }
@@ -48,10 +49,8 @@ func main() {
 	}
 	defer f.Close()
 
-	p := newParser(f)
-	if err := p.Parse(); err != nil {
-		panic(err)
-	}
+	var p parser
+	p.Parse(f)
 
 	var (
 		limiter = make(chan struct{}, 10)
@@ -63,7 +62,7 @@ func main() {
 		limiter <- struct{}{}
 		go func(cc *Clinic) {
 			if err := doGeocodeClinic(cc); err != nil {
-				fmt.Fprintf(os.Stderr, "could not geocode clinic: %v", err)
+				fmt.Fprintf(os.Stderr, "could not geocode clinic %q - %q: %v\n", cc.Name, cc.RawAddress, err)
 			}
 			<-limiter
 			wg.Done()
@@ -96,62 +95,66 @@ func main() {
 }
 
 const (
-	_MODE_NONE int = iota
+	_MODE_NONE = iota
 	_MODE_SECTION
+	_MODE_NAME
 	_MODE_ADDRESS
+	_MODE_PHONE
 )
 
 type parser struct {
-	s        *bufio.Scanner
-	prevMode int
-	mode     int
+	nextMode int
 }
 
-func newParser(f io.Reader) parser {
-	return parser{
-		s:        bufio.NewScanner(f),
-		prevMode: _MODE_NONE,
-		mode:     _MODE_NONE,
-	}
-}
-
-func (p parser) Parse() error {
-	for p.s.Scan() {
-		line := p.s.Text()
+func (p *parser) Parse(f io.Reader) {
+	var cc Clinic
+	r := bufio.NewScanner(f)
+	for r.Scan() {
+		line := r.Text()
 		line = strings.TrimSpace(line)
+
 		if line == "" {
+			c := cc
+			cc = Clinic{}
+			clinics = append(clinics, &c)
+			p.nextMode = _MODE_NAME
+			continue
+		} else if isSection(line) {
+			// section
+			p.nextMode = _MODE_NAME
 			continue
 		}
 
-		if unicode.IsNumber(rune(line[0])) && line[1] == '.' {
-			p.prevMode = _MODE_NONE
-			p.mode = _MODE_SECTION
-		} else if p.mode == _MODE_SECTION {
-			p.prevMode = p.mode
-			p.mode = _MODE_ADDRESS
-		}
-
-		switch p.mode {
-		case _MODE_SECTION:
+		switch p.nextMode {
+		case _MODE_NAME:
+			cc.Name = line
+			p.nextMode = _MODE_ADDRESS
 		case _MODE_ADDRESS:
-			var address string
-			if p.s.Scan() {
-				address = p.s.Text()
-				address = strings.TrimSpace(address)
-			}
-			if address != "" {
-				cc := &Clinic{
-					Name:       line,
-					RawAddress: address,
-				}
-				clinics = append(clinics, cc)
-			}
+			cc.RawAddress = line
+			p.nextMode = _MODE_PHONE
+		case _MODE_PHONE:
+			cc.Phone = line
 		}
 	}
-	return p.s.Err()
+}
+
+func isSection(line string) bool {
+	if len(line) < 3 {
+		return false
+	}
+	a, b, c := line[0], line[1], line[2]
+	if unicode.IsNumber(rune(a)) {
+		if b == '.' || (unicode.IsNumber(rune(b)) && c == '.') {
+			return true
+		}
+	}
+	return false
 }
 
 func doGeocodeClinic(cc *Clinic) error {
+	if cc.RawAddress == "" {
+		return fmt.Errorf("no raw address in clinic: %+v", cc)
+	}
 	vals := make(url.Values)
 	vals.Set("geocode", cc.RawAddress)
 	vals.Set("lang", "ru_RU")
@@ -181,22 +184,25 @@ func doGeocodeClinic(cc *Clinic) error {
 		return err
 	}
 
+	if len(geoResp.Response.GeoObjectCollection.FeatureMember) == 0 {
+		return fmt.Errorf("no geoobject in response: %+v", geoResp)
+	}
 	geoObj := geoResp.Response.GeoObjectCollection.FeatureMember[0].GeoObject
 
 	rawPoints := strings.SplitN(geoObj.Point.Pos, " ", 2)
 	if len(rawPoints) != 2 {
 		return fmt.Errorf("bad points in response: %s", geoObj.Point.Pos)
 	}
-	var p1, p2 float64
-	p1, err = strconv.ParseFloat(strings.TrimSpace(rawPoints[0]), 32)
+	var lat, long float64
+	lat, err = strconv.ParseFloat(strings.TrimSpace(rawPoints[0]), 32)
 	if err == nil {
-		p2, err = strconv.ParseFloat(strings.TrimSpace(rawPoints[1]), 32)
+		long, err = strconv.ParseFloat(strings.TrimSpace(rawPoints[1]), 32)
 	}
 	if err != nil {
 		return err
 	}
 
-	cc.Points = []float64{p2, p1}
+	cc.Points = []float64{long, lat}
 	cc.Address = geoObj.MetaDataProperty.GeocoderMetaData.Text
 
 	return nil
